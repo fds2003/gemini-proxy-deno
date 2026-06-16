@@ -11,7 +11,7 @@ COPY . .
 RUN deno cache src/deno_index.ts
 
 # 暴露端口
-EXPOSE 8000
+EXPOSE 8001
 
 # 启动应用
 CMD ["deno", "run", "--allow-net", "--allow-read", "--allow-env", "src/deno_index.ts"]

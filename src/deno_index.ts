@@ -9,44 +9,52 @@ async function handleWebSocket(req: Request): Promise<Response> {
   const pendingMessages: string[] = [];
   const targetWs = new WebSocket(targetUrl);
 
+  console.log('Client connected, proxying to:', targetUrl);
+
   targetWs.onopen = () => {
-    console.log('Connected to Gemini');
+    console.log('Target WebSocket connected to Gemini');
     pendingMessages.forEach(msg => targetWs.send(msg));
+    console.log(`Flushed ${pendingMessages.length} pending messages`);
     pendingMessages.length = 0;
   };
 
   clientWs.onmessage = (event) => {
-    console.log('Client message received');
+    console.log('Client message received, forwarding to target');
     if (targetWs.readyState === WebSocket.OPEN) {
       targetWs.send(event.data);
     } else {
+      console.log('Target not ready, queuing message');
       pendingMessages.push(event.data);
     }
   };
 
   targetWs.onmessage = (event) => {
-    console.log('Gemini message received');
+    console.log('Target message received, forwarding to client');
     if (clientWs.readyState === WebSocket.OPEN) {
       clientWs.send(event.data);
     }
   };
 
   clientWs.onclose = (event) => {
-    console.log('Client connection closed');
+    console.log(`Client connection closed (code: ${event.code})`);
     if (targetWs.readyState === WebSocket.OPEN) {
       targetWs.close(1000, event.reason);
     }
   };
 
   targetWs.onclose = (event) => {
-    console.log('Gemini connection closed');
+    console.log(`Target connection closed (code: ${event.code}, reason: ${event.reason})`);
     if (clientWs.readyState === WebSocket.OPEN) {
       clientWs.close(event.code, event.reason);
     }
   };
 
   targetWs.onerror = (error) => {
-    console.error('Gemini WebSocket error:', error);
+    console.error('Target WebSocket error:', {
+      targetUrl,
+      readyState: targetWs.readyState,
+      message: error.message || 'Unknown error',
+    });
   };
 
   return response;

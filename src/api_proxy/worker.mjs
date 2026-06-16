@@ -1,17 +1,18 @@
-import { Buffer } from "node:buffer";
-
 export default {
   async fetch (request) {
     if (request.method === "OPTIONS") {
       return handleOPTIONS();
+    }
+    const auth = request.headers.get("Authorization");
+    if (!auth || !auth.startsWith("Bearer ") || auth.length < 8) {
+      return new Response("Unauthorized", { status: 401 });
     }
     const errHandler = (err) => {
       console.error(err);
       return new Response(err.message, fixCors({ status: err.status ?? 500 }));
     };
     try {
-      const auth = request.headers.get("Authorization");
-      const apiKey = auth?.split(" ")[1];
+      const apiKey = auth.slice(7);
       const assert = (success) => {
         if (!success) {
           throw new HttpError("The specified HTTP method is not allowed for the requested resource", 400);
@@ -64,6 +65,18 @@ const handleOPTIONS = async () => {
   });
 };
 
+const retryFetch = async (url, options, retries = 2) => {
+  try {
+    const response = await fetch(url, options);
+    if (response.ok || retries <= 0 || (response.status < 500)) return response;
+    throw new Error(`HTTP ${response.status}`);
+  } catch (error) {
+    if (retries <= 0) throw error;
+    await new Promise(r => setTimeout(r, 500 * Math.pow(2, 2 - retries)));
+    return retryFetch(url, options, retries - 1);
+  }
+};
+
 const BASE_URL = "https://generativelanguage.googleapis.com";
 const API_VERSION = "v1beta";
 
@@ -76,7 +89,7 @@ const makeHeaders = (apiKey, more) => ({
 });
 
 async function handleModels (apiKey) {
-  const response = await fetch(`${BASE_URL}/${API_VERSION}/models`, {
+  const response = await retryFetch(`${BASE_URL}/${API_VERSION}/models`, {
     headers: makeHeaders(apiKey),
   });
   let { body } = response;
@@ -110,7 +123,7 @@ async function handleEmbeddings (req, apiKey) {
     req.model = DEFAULT_EMBEDDINGS_MODEL;
     model = "models/" + req.model;
   }
-  const response = await fetch(`${BASE_URL}/${API_VERSION}/${model}:batchEmbedContents`, {
+  const response = await retryFetch(`${BASE_URL}/${API_VERSION}/${model}:batchEmbedContents`, {
     method: "POST",
     headers: makeHeaders(apiKey, { "Content-Type": "application/json" }),
     body: JSON.stringify({
@@ -137,7 +150,7 @@ async function handleEmbeddings (req, apiKey) {
   return new Response(body, fixCors(response));
 }
 
-const DEFAULT_MODEL = "gemini-1.5-pro-latest";
+const DEFAULT_MODEL = "gemini-2.0-flash";
 async function handleCompletions (req, apiKey) {
   let model = DEFAULT_MODEL;
   switch(true) {
@@ -153,7 +166,7 @@ async function handleCompletions (req, apiKey) {
   const TASK = req.stream ? "streamGenerateContent" : "generateContent";
   let url = `${BASE_URL}/${API_VERSION}/models/${model}:${TASK}`;
   if (req.stream) { url += "?alt=sse"; }
-  const response = await fetch(url, {
+  const response = await retryFetch(url, {
     method: "POST",
     headers: makeHeaders(apiKey, { "Content-Type": "application/json" }),
     body: JSON.stringify(await transformRequest(req)), // try
@@ -247,7 +260,10 @@ const parseImg = async (url) => {
         throw new Error(`${response.status} ${response.statusText} (${url})`);
       }
       mimeType = response.headers.get("content-type");
-      data = Buffer.from(await response.arrayBuffer()).toString("base64");
+      const bytes = new Uint8Array(await response.arrayBuffer());
+      let binary = '';
+      for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+      data = btoa(binary);
     } catch (err) {
       throw new Error("Error fetching image: " + err.toString());
     }
@@ -318,7 +334,7 @@ const transformMessages = async (messages) => {
     }
   }
   if (system_instruction && contents.length === 0) {
-    contents.push({ role: "model", parts: { text: " " } });
+    contents.push({ role: "model", parts: [{ text: " " }] });
   }
   //console.info(JSON.stringify(contents, 2));
   return { system_instruction, contents };
