@@ -174,20 +174,65 @@ async function handleCompletions (req, apiKey) {
 
   let body = response.body;
   if (response.ok) {
-    let id = generateChatcmplId(); //"chatcmpl-8pMMaqXMK68B3nyDBrapTDrhkHBQK";
+    let id = generateChatcmplId();
     if (req.stream) {
+      const streamIncludeUsage = req.stream_options?.include_usage;
+      const last = [];
       body = response.body
         .pipeThrough(new TextDecoderStream())
         .pipeThrough(new TransformStream({
-          transform: parseStream,
-          flush: parseStreamFlush,
-          buffer: "",
+          transform(chunk, controller) {
+            if (!chunk) return;
+            this._buf = (this._buf || "") + chunk;
+            const re = /^data: (.*)(?:\n\n|\r\r|\r\n\r\n)/;
+            let m;
+            while ((m = this._buf.match(re))) {
+              controller.enqueue(m[1]);
+              this._buf = this._buf.substring(m[0].length);
+            }
+          },
+          flush(controller) {
+            if (this._buf) controller.enqueue(this._buf);
+          }
         }))
         .pipeThrough(new TransformStream({
-          transform: toOpenAiStream,
-          flush: toOpenAiStreamFlush,
-          streamIncludeUsage: req.stream_options?.include_usage,
-          model, id, last: [],
+          transform(chunk, controller) {
+            const line = typeof chunk === "string" ? chunk : "";
+            if (!line) return;
+            let data;
+            try { data = JSON.parse(line); } catch (err) {
+              console.error("Parse error:", line, err);
+              data = { candidates: [{ finishReason: "error", content: { parts: [{ text: String(err) }] }, index: 0 }] };
+            }
+            const cand = data.candidates[0];
+            cand.index = cand.index || 0;
+            if (!last[cand.index]) {
+              const item = transformCandidatesDelta(cand);
+              item.delta.content = "";
+              item.finish_reason = null;
+              controller.enqueue("data: " + JSON.stringify({ id, choices: [item], created: Math.floor(Date.now()/1000), model, object: "chat.completion.chunk" }) + "\n\n");
+            }
+            last[cand.index] = data;
+            if (cand.content) {
+              const item = transformCandidatesDelta(cand);
+              delete item.delta.role;
+              item.finish_reason = null;
+              const output = { id, choices: [item], created: Math.floor(Date.now()/1000), model, object: "chat.completion.chunk" };
+              if (data.usageMetadata && streamIncludeUsage) output.usage = null;
+              controller.enqueue("data: " + JSON.stringify(output) + "\n\n");
+            }
+          },
+          flush(controller) {
+            for (const data of last) {
+              const item = transformCandidatesDelta(data.candidates[0]);
+              item.delta = {};
+              item.finish_reason = reasonsMap[data.candidates[0].finishReason] || data.candidates[0].finishReason;
+              const output = { id, choices: [item], created: Math.floor(Date.now()/1000), model, object: "chat.completion.chunk" };
+              if (data.usageMetadata && streamIncludeUsage) output.usage = transformUsage(data.usageMetadata);
+              controller.enqueue("data: " + JSON.stringify(output) + "\n\n");
+            }
+            controller.enqueue("data: [DONE]\n\n");
+          }
         }))
         .pipeThrough(new TextEncoderStream());
     } else {
@@ -396,18 +441,7 @@ const processCompletionsResponse = (data, model, id) => {
   });
 };
 
-const responseLineRE = /^data: (.*)(?:\n\n|\r\r|\r\n\r\n)/;
-async function parseStream (chunk, controller) {
-  chunk = await chunk;
-  if (!chunk) { return; }
-  this.buffer += chunk;
-  do {
-    const match = this.buffer.match(responseLineRE);
-    if (!match) { break; }
-    controller.enqueue(match[1]);
-    this.buffer = this.buffer.substring(match[0].length);
-  } while (true); // eslint-disable-line no-constant-condition
-}
+
 async function parseStreamFlush (controller) {
   if (this.buffer) {
     console.error("Invalid data:", this.buffer);
