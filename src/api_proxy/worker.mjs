@@ -195,7 +195,12 @@ async function handleCompletions (req, apiKey) {
       body = processCompletionsResponse(JSON.parse(body), model, id);
     }
   }
-  return new Response(body, fixCors(response));
+  const corsHeaders = fixCors(response);
+  if (req.stream) {
+    corsHeaders.headers.delete("content-length");
+    corsHeaders.headers.delete("content-disposition");
+  }
+  return new Response(body, corsHeaders);
 }
 
 const harmCategory = [
